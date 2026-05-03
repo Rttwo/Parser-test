@@ -68,8 +68,19 @@ def calc_diff(price_dex: float, price_cex: float) -> float:
 
 async def send_alert(bot: Bot, token_name: str, symbol: str,
                      dex_price: float, cex_price: float, diff: float):
-    direction = "📈 DEX > CEX" if diff > 0 else "📉 DEX < CEX"
-    arrow = "🟢" if diff > 0 else "🔴"
+    # DEX вырос → MEXC догонит вверх → ЛОНГ
+    # DEX упал  → MEXC догонит вниз  → ШОРТ
+    if diff > 0:
+        arrow = "🟢"
+        direction = "📈 DEX > CEX"
+        position = "🟩 ЛОНГ на MEXC"
+        reason = "DEX вырос — MEXC будет догонять вверх"
+    else:
+        arrow = "🔴"
+        direction = "📉 DEX < CEX"
+        position = "🟥 ШОРТ на MEXC"
+        reason = "DEX упал — MEXC будет догонять вниз"
+
     msg = (
         f"{arrow} *Арбитраж обнаружен!*\n\n"
         f"🪙 Токен: `{token_name}` ({symbol})\n"
@@ -79,6 +90,9 @@ async def send_alert(bot: Bot, token_name: str, symbol: str,
         f"🏦 MEXC (CEX):    `${cex_price:.8f}`\n"
         f"─────────────────\n"
         f"{direction}\n"
+        f"─────────────────\n"
+        f"*{position}*\n"
+        f"_{reason}_\n"
         f"⚡️ Порог: ≥ {THRESHOLD_PERCENT}%"
     )
     await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
