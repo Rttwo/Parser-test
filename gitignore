@@ -1,0 +1,17 @@
+# Секреты — никогда не загружать на GitHub!
+config.py
+.env
+
+# Python мусор
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Логи
+*.log
+nohup.out
+
+# Виртуальное окружение
+venv/
+env/
+.venv/
