@@ -23,23 +23,39 @@ last_alert: dict[str, float] = {}
 ALERT_COOLDOWN = 300  # 5 минут между повторными алертами по одному токену
 
 
-async def get_jupiter_prices(mints: list[str]) -> dict[str, float]:
-    """Цены с Jupiter Price API (DEX-агрегатор Solana)"""
-    ids = ",".join(mints)
-    url = f"https://lite.jupiter.aggregator.com/price/v2?ids={ids}"
+async def get_dex_prices(mints: list[str]) -> dict[str, float]:
+    """Цены с DexScreener (работает для токенов Solana по mint-адресу)"""
+    prices = {}
+    # DexScreener принимает до 30 адресов за раз
+    chunk_size = 30
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json().get("data", {})
-            return {
-                mint: float(info["price"])
-                for mint, info in data.items()
-                if info and info.get("price")
-            }
+        async with httpx.AsyncClient(timeout=15) as client:
+            for i in range(0, len(mints), chunk_size):
+                chunk = mints[i:i + chunk_size]
+                url = f"https://api.dexscreener.com/tokens/v1/solana/{','.join(chunk)}"
+                r = await client.get(url)
+                r.raise_for_status()
+                pairs = r.json()
+                # Для каждого mint берём пару с наибольшей ликвидностью
+                best: dict[str, tuple[float, float]] = {}  # mint -> (price, liquidity)
+                for pair in pairs:
+                    if pair.get("quoteToken", {}).get("symbol") not in ("USDC", "USDT"):
+                        continue
+                    base_addr = pair.get("baseToken", {}).get("address", "")
+                    price_str = pair.get("priceUsd")
+                    liquidity = pair.get("liquidity", {}).get("usd", 0) or 0
+                    if base_addr and price_str:
+                        try:
+                            price = float(price_str)
+                            if base_addr not in best or liquidity > best[base_addr][1]:
+                                best[base_addr] = (price, liquidity)
+                        except (ValueError, TypeError):
+                            pass
+                for addr, (price, _) in best.items():
+                    prices[addr] = price
     except Exception as e:
-        logger.error(f"Jupiter API error: {e}")
-        return {}
+        logger.error(f"DexScreener API error: {e}")
+    return prices
 
 
 async def get_mexc_prices(symbols: list[str]) -> dict[str, float]:
@@ -86,7 +102,7 @@ async def send_alert(bot: Bot, token_name: str, symbol: str,
         f"🪙 Токен: `{token_name}` ({symbol})\n"
         f"📊 Разница: *{diff:+.2f}%*\n"
         f"─────────────────\n"
-        f"🌊 Jupiter (DEX): `${dex_price:.8f}`\n"
+        f"🌊 DexScreener (DEX): `${dex_price:.8f}`\n"
         f"🏦 MEXC (CEX):    `${cex_price:.8f}`\n"
         f"─────────────────\n"
         f"{direction}\n"
@@ -108,7 +124,7 @@ async def check_prices(bot: Bot):
     logger.info(f"Проверяем {len(TOKENS)} токенов...")
 
     jup_prices, mexc_prices = await asyncio.gather(
-        get_jupiter_prices(mints),
+        get_dex_prices(mints),
         get_mexc_prices(symbols)
     )
 
@@ -122,7 +138,7 @@ async def check_prices(bot: Bot):
         cex_price = mexc_prices.get(symbol)
 
         if dex_price is None:
-            logger.warning(f"{name}: нет цены с Jupiter")
+            logger.warning(f"{name}: нет цены с DexScreener")
             continue
         if cex_price is None:
             logger.warning(f"{name}: нет цены с MEXC")
@@ -151,7 +167,7 @@ async def main():
             f"📋 Токенов: {len(TOKENS)}\n"
             f"⏱ Интервал: каждые {CHECK_INTERVAL} сек\n"
             f"🎯 Порог: {THRESHOLD_PERCENT}%\n\n"
-            f"Слежу за Jupiter vs MEXC..."
+            f"Слежу за DexScreener vs MEXC..."
         ),
         parse_mode=ParseMode.MARKDOWN
     )
