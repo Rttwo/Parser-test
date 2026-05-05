@@ -44,6 +44,9 @@ async def get_dex_prices(mints: list[str]) -> dict[str, float]:
                     base_addr = pair.get("baseToken", {}).get("address", "")
                     price_str = pair.get("priceUsd")
                     liquidity = pair.get("liquidity", {}).get("usd", 0) or 0
+                    # Фильтруем пары с ликвидностью меньше $50k — это мусорные пулы
+                    if liquidity < 50_000:
+                        continue
                     if base_addr and price_str:
                         try:
                             price = float(price_str)
@@ -146,6 +149,11 @@ async def check_prices(bot: Bot):
 
         diff = calc_diff(dex_price, cex_price)
         logger.info(f"{name}: DEX=${dex_price:.8f} | CEX=${cex_price:.8f} | diff={diff:+.2f}%")
+
+        # Защита от мусорных данных — спред >50% это скорее всего баг
+        if abs(diff) > 50:
+            logger.warning(f"{name}: спред {diff:+.2f}% слишком большой, пропускаем (вероятно баг данных)")
+            continue
 
         if abs(diff) >= THRESHOLD_PERCENT:
             if (now - last_alert.get(symbol, 0)) >= ALERT_COOLDOWN:
