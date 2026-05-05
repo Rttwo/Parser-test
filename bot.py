@@ -111,9 +111,8 @@ def calc_diff(price_dex: float, price_cex: float) -> float:
 
 
 async def send_alert(bot: Bot, token_name: str, symbol: str,
-                     dex_price: float, cex_price: float, diff: float):
-    # DEX вырос → MEXC догонит вверх → ЛОНГ
-    # DEX упал  → MEXC догонит вниз  → ШОРТ
+                     dex_price: float, cex_price: float, diff: float,
+                     mint: str, chain: str):
     if diff > 0:
         arrow = "🟢"
         direction = "📈 DEX > CEX"
@@ -125,21 +124,27 @@ async def send_alert(bot: Bot, token_name: str, symbol: str,
         position = "🟥 ШОРТ на MEXC"
         reason = "DEX упал — MEXC будет догонять вниз"
 
+    # Ссылки на графики
+    dex_url = f"https://dexscreener.com/{chain}/{mint}"
+    mexc_url = f"https://www.mexc.com/futures/{symbol}_USDT"
+
     msg = (
-        f"{arrow} *Арбитраж обнаружен!*\n\n"
-        f"🪙 Токен: `{token_name}` ({symbol})\n"
+        f"{arrow} *Арбитраж! {position}*\n\n"
+        f"🪙 {token_name} ({symbol})\n"
         f"📊 Разница: *{diff:+.2f}%*\n"
         f"─────────────────\n"
-        f"🌊 DexScreener (DEX): `${dex_price:.8f}`\n"
-        f"🏦 MEXC (CEX):    `${cex_price:.8f}`\n"
-        f"─────────────────\n"
-        f"{direction}\n"
-        f"─────────────────\n"
-        f"*{position}*\n"
+        f"🌊 DEX: `${dex_price:.8f}`\n"
+        f"🏦 MEXC: `${cex_price:.8f}`\n"
         f"_{reason}_\n"
-        f"⚡️ Порог: ≥ {THRESHOLD_PERCENT}%"
+        f"─────────────────\n"
+        f"📈 [График DEX]({dex_url})\n"
+        f"📊 [Фьючерс MEXC]({mexc_url})"
     )
-    await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
+    await bot.send_message(
+        chat_id=CHAT_ID, text=msg,
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True
+    )
     logger.info(f"Алерт отправлен: {token_name} diff={diff:+.2f}%")
 
 
@@ -183,7 +188,7 @@ async def check_prices(bot: Bot):
 
         if abs(diff) >= THRESHOLD_PERCENT:
             if (now - last_alert.get(symbol, 0)) >= ALERT_COOLDOWN:
-                await send_alert(bot, name, symbol, dex_price, cex_price, diff)
+                await send_alert(bot, name, symbol, dex_price, cex_price, diff, mint, chain)
                 last_alert[symbol] = now
             else:
                 logger.info(f"{name}: cooldown активен, пропускаем")
