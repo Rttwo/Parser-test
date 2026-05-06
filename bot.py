@@ -1,223 +1,93 @@
-import asyncio
-import logging
-import os
-import httpx
-from telegram import Bot
-from telegram.constants import ParseMode
-from tokens import TOKENS
+# ============================================================
+#  МЕМКОИНЫ ДЛЯ МОНИТОРИНГА
+#  Критерии: есть фьючерс на MEXC + объём DEX > $50k/сутки
+#  Адреса верифицированы через Etherscan / BscScan / BaseScan / Solscan
+# ============================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-logger = logging.getLogger(__name__)
+TOKENS = [
 
-# Секреты — только из переменных окружения (Railway)
-TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID           = os.environ["CHAT_ID"]
-CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL", "30"))
-THRESHOLD_PERCENT = float(os.environ.get("THRESHOLD_PERCENT", "3.0"))
+    # ══════════════════════════════════════════════════════
+    #  SOLANA
+    # ══════════════════════════════════════════════════════
 
-# Кэш: symbol -> timestamp последнего алерта
-last_alert: dict[str, float] = {}
-ALERT_COOLDOWN = 300  # 5 минут между повторными алертами по одному токену
+    # ✅ Тикер MEXC: BONKUSDT | Solscan верифицирован
+    {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+     "symbol": "BONK", "name": "Bonk", "chain": "solana"},
 
+    # ✅ Тикер MEXC: WIFUSDT | Solscan верифицирован
+    {"mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+     "symbol": "WIF", "name": "dogwifhat", "chain": "solana"},
 
-async def get_dex_prices(tokens: list[dict]) -> dict[str, float]:
-    """Цены с DexScreener — поддержка Solana, Ethereum, BNB, Base"""
-    prices = {}
-    # Группируем токены по сети
-    by_chain: dict[str, list[str]] = {}
-    for t in tokens:
-        chain = t.get("chain", "solana")
-        # DexScreener использует разные названия сетей
-        chain_map = {"bsc": "bsc", "ethereum": "ethereum", "base": "base", "solana": "solana"}
-        dex_chain = chain_map.get(chain, "solana")
-        by_chain.setdefault(dex_chain, []).append(t["mint"])
+    # ✅ Тикер MEXC: POPCATUSDT | Solscan верифицирован
+    {"mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+     "symbol": "POPCAT", "name": "Popcat", "chain": "solana"},
 
-    chunk_size = 30
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            for chain, mints in by_chain.items():
-                for i in range(0, len(mints), chunk_size):
-                    chunk = mints[i:i + chunk_size]
-                    url = f"https://api.dexscreener.com/tokens/v1/{chain}/{','.join(chunk)}"
-                    try:
-                        r = await client.get(url)
-                        r.raise_for_status()
-                        pairs = r.json()
-                    except Exception as e:
-                        logger.error(f"DexScreener {chain} error: {e}")
-                        continue
-                    best: dict[str, tuple[float, float]] = {}
-                    for pair in pairs:
-                        quote_sym = pair.get("quoteToken", {}).get("symbol", "")
-                        if quote_sym not in ("USDC", "USDT", "WETH", "WBNB"):
-                            continue
-                        base_addr = pair.get("baseToken", {}).get("address", "")
-                        # Нормализуем адрес (ETH/BNB/Base — lowercase)
-                        if chain != "solana":
-                            base_addr = base_addr.lower()
-                        price_str = pair.get("priceUsd")
-                        liquidity = pair.get("liquidity", {}).get("usd", 0) or 0
-                        if liquidity < 50_000:
-                            continue
-                        if base_addr and price_str:
-                            try:
-                                price = float(price_str)
-                                if base_addr not in best or liquidity > best[base_addr][1]:
-                                    best[base_addr] = (price, liquidity)
-                            except (ValueError, TypeError):
-                                pass
-                    for addr, (price, _) in best.items():
-                        prices[addr] = price
-    except Exception as e:
-        logger.error(f"DexScreener error: {e}")
-    return prices
+    # ✅ Тикер MEXC: MEWUSDT | Solscan верифицирован
+    {"mint": "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5",
+     "symbol": "MEW", "name": "cat in a dogs world", "chain": "solana"},
 
+    # ✅ Тикер MEXC: TRUMPUSDT | Solscan верифицирован
+    {"mint": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+     "symbol": "TRUMP", "name": "OFFICIAL TRUMP", "chain": "solana"},
 
-async def get_mexc_prices(symbols: list[str]) -> dict[str, float]:
-    """Цены с MEXC Futures (перпетуальные контракты)"""
-    prices = {}
-    url = "https://contract.mexc.com/api/v1/contract/ticker"
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json().get("data", [])
-            # Строим словарь: "BTC_USDT" -> lastPrice
-            all_prices = {}
-            for item in data:
-                symbol = item.get("symbol", "")
-                price = item.get("lastPrice")
-                if symbol and price:
-                    try:
-                        all_prices[symbol] = float(price)
-                    except (ValueError, TypeError):
-                        pass
-            for symbol in symbols:
-                key = f"{symbol}_USDT"
-                if key in all_prices:
-                    prices[symbol] = all_prices[key]
-                else:
-                    logger.warning(f"MEXC Futures: {key} не найден (нет фьючерса)")
-    except Exception as e:
-        logger.error(f"MEXC Futures API error: {e}")
-    return prices
+    # ✅ Тикер MEXC: FARTCOINUSDT | Solscan верифицирован
+    {"mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
+     "symbol": "FARTCOIN", "name": "Fartcoin", "chain": "solana"},
 
+    # ✅ Тикер MEXC: PENGUUSDT | Solscan верифицирован
+    {"mint": "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
+     "symbol": "PENGU", "name": "Pudgy Penguins", "chain": "solana"},
 
-def calc_diff(price_dex: float, price_cex: float) -> float:
-    return ((price_dex - price_cex) / price_cex) * 100
+    # ✅ Тикер MEXC: PNUTUSDT | Solscan верифицирован
+    {"mint": "HLptm5e6rTgh4EKgDpYFrnRHbjpkMyVdEeREEa2G7rf9",
+     "symbol": "PNUT", "name": "Peanut the Squirrel", "chain": "solana"},
 
+    # ══════════════════════════════════════════════════════
+    #  ETHEREUM
+    # ══════════════════════════════════════════════════════
 
-async def send_alert(bot: Bot, token_name: str, symbol: str,
-                     dex_price: float, cex_price: float, diff: float,
-                     mint: str, chain: str):
-    if diff > 0:
-        arrow = "🟢"
-        direction = "📈 DEX > CEX"
-        position = "🟩 ЛОНГ на MEXC"
-        reason = "DEX вырос — MEXC будет догонять вверх"
-    else:
-        arrow = "🔴"
-        direction = "📉 DEX < CEX"
-        position = "🟥 ШОРТ на MEXC"
-        reason = "DEX упал — MEXC будет догонять вниз"
+    # ✅ Тикер MEXC: PEPEUSDT | Etherscan verified + Coinbase official
+    {"mint": "0x6982508145454Ce325dDbE47a25d4ec3d2311933",
+     "symbol": "PEPE", "name": "Pepe", "chain": "ethereum"},
 
-    # Ссылки на графики
-    dex_url = f"https://dexscreener.com/{chain}/{mint}"
-    mexc_url = f"https://www.mexc.com/futures/{symbol}_USDT"
+    # ✅ Тикер MEXC: SHIBUSDT | Etherscan verified
+    {"mint": "0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE",
+     "symbol": "SHIB", "name": "Shiba Inu", "chain": "ethereum"},
 
-    msg = (
-        f"{arrow} *Арбитраж! {position}*\n\n"
-        f"🪙 {token_name} ({symbol})\n"
-        f"📊 Разница: *{diff:+.2f}%*\n"
-        f"─────────────────\n"
-        f"🌊 DEX: `${dex_price:.8f}`\n"
-        f"🏦 MEXC: `${cex_price:.8f}`\n"
-        f"_{reason}_\n"
-        f"─────────────────\n"
-        f"📈 [График DEX]({dex_url})\n"
-        f"📊 [Фьючерс MEXC]({mexc_url})"
-    )
-    await bot.send_message(
-        chat_id=CHAT_ID, text=msg,
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True
-    )
-    logger.info(f"Алерт отправлен: {token_name} diff={diff:+.2f}%")
+    # ✅ Тикер MEXC: FLOKIUSDT | CoinGecko official ETH адрес
+    {"mint": "0xcf0C122c6b73FF809C693DB761e7BaeBe62b6a2E",
+     "symbol": "FLOKI", "name": "Floki", "chain": "ethereum"},
 
+    # ✅ Тикер MEXC: TURBOUSDT | Etherscan verified
+    {"mint": "0xAAAe846046481E13b27E4fE89E5f67d8d43BD9C1",
+     "symbol": "TURBO", "name": "Turbo", "chain": "ethereum"},
 
-async def check_prices(bot: Bot):
-    import time
+    # ✅ Тикер MEXC: SPXUSDT | Etherscan verified — SPX6900
+    {"mint": "0xE0f63A424a4439cBE457D80E4f4b51aD25b2c56F",
+     "symbol": "SPX", "name": "SPX6900", "chain": "ethereum"},
 
-    logger.info(f"Проверяем {len(TOKENS)} токенов...")
+    # ✅ Тикер MEXC: ASTEROIDUSDT (верхний, объём $3.5M) | Etherscan verified
+    {"mint": "0xf280B16EF293D8e534e370794ef26bF312694126",
+     "symbol": "ASTEROID", "name": "Asteroid", "chain": "ethereum"},
 
-    dex_prices, mexc_prices = await asyncio.gather(
-        get_dex_prices(TOKENS),
-        get_mexc_prices([t["symbol"] for t in TOKENS])
-    )
+    # ══════════════════════════════════════════════════════
+    #  BASE
+    # ══════════════════════════════════════════════════════
 
-    now = time.time()
-    for token in TOKENS:
-        mint   = token["mint"]
-        symbol = token["symbol"]
-        name   = token["name"]
-        chain  = token.get("chain", "solana")
+    # ✅ Тикер MEXC: BRETTUSDT | BaseScan verified + CoinGecko
+    {"mint": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+     "symbol": "BRETT", "name": "Brett", "chain": "base"},
 
-        # ETH/BNB/Base адреса — lowercase для сравнения
-        lookup_key = mint.lower() if chain != "solana" else mint
+    # ══════════════════════════════════════════════════════
+    #  BNB CHAIN
+    # ══════════════════════════════════════════════════════
 
-        dex_price = dex_prices.get(lookup_key)
-        cex_price = mexc_prices.get(symbol)
+    # ✅ Тикер MEXC: DOGEUSDT | BscScan verified — Binance-Peg DOGE
+    {"mint": "0xbA2aE424d960c26247Dd6c32edC70B295c744C43",
+     "symbol": "DOGE", "name": "Dogecoin (BNB)", "chain": "bsc"},
 
-        if dex_price is None:
-            logger.warning(f"{name}: нет цены с DexScreener")
-            continue
-        if cex_price is None:
-            logger.warning(f"{name}: нет цены с MEXC")
-            continue
+    # ✅ Тикер MEXC: 熊猫头USDT | BscScan verified — MEXC Meme+ листинг
+    {"mint": "0xf3525965a4aD3ca0AC13f4D2F237113691194444",
+     "symbol": "熊猫头", "name": "熊猫头 (Panda Head)", "chain": "bsc"},
 
-        diff = calc_diff(dex_price, cex_price)
-        logger.info(f"{name}: DEX=${dex_price:.8f} | CEX=${cex_price:.8f} | diff={diff:+.2f}%")
-
-        # Защита от мусорных данных — спред >50% это скорее всего баг
-        if abs(diff) > 50:
-            logger.warning(f"{name}: спред {diff:+.2f}% слишком большой, пропускаем (вероятно баг данных)")
-            continue
-
-        if abs(diff) >= THRESHOLD_PERCENT:
-            if (now - last_alert.get(symbol, 0)) >= ALERT_COOLDOWN:
-                await send_alert(bot, name, symbol, dex_price, cex_price, diff, mint, chain)
-                last_alert[symbol] = now
-            else:
-                logger.info(f"{name}: cooldown активен, пропускаем")
-
-
-async def main():
-    bot = Bot(token=TELEGRAM_TOKEN)
-    me = await bot.get_me()
-    logger.info(f"Бот запущен: @{me.username}")
-
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text=(
-            f"🤖 *Бот арбитража запущен*\n\n"
-            f"📋 Токенов: {len(TOKENS)}\n"
-            f"⏱ Интервал: каждые {CHECK_INTERVAL} сек\n"
-            f"🎯 Порог: {THRESHOLD_PERCENT}%\n\n"
-            f"Слежу за DexScreener vs MEXC..."
-        ),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-    while True:
-        try:
-            await check_prices(bot)
-        except Exception as e:
-            logger.error(f"Ошибка в цикле: {e}")
-        await asyncio.sleep(CHECK_INTERVAL)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+]
